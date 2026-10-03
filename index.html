@@ -1,0 +1,182 @@
+ <!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Outage Reporter</title>
+<style>
+body{font-family:Arial,sans-serif;background:#e8edf2;color:#1b2a3a;margin:0}
+main{max-width:480px;margin:0 auto;padding:20px}
+#panel{margin:16px 0;padding:14px;background:white;border-radius:10px}
+#panel button{font-size:1rem;padding:8px 12px;margin-right:8px;cursor:pointer}
+ul{padding-left:18px}
+#grid{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}
+.tile{aspect-ratio:1;border:0;border-radius:6px;font-weight:bold;cursor:pointer}
+.on{background:#f2b705;color:#1b2a3a}
+.out{background:#2b3544;color:#8a97a6}
+.selected{outline:3px solid #1b2a3a}
+</style>
+</head>
+<body>
+<main>
+  <h1>Is your street dark?</h1>
+  <p>Tap your block to report a power cut.</p>
+  <p id="summary"></p>
+  <p id="pattern"></p>
+  <div id="grid"></div>
+  <div id="panel">
+    <h2 id="panelTitle">Pick a block</h2>
+    <p id="panelText">Tap any square on the map.</p>
+    <div id="panelButtons"></div>
+  </div>
+  <h2>Recent reports</h2>
+  <ul id="list"></ul>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+const ROWS = ["A","B","C","D","E","F"];
+const COLS = 6;
+let reports = [];
+let selected = null;
+
+const { createClient } = supabase;
+const db = createClient("https://rrdrvfluybyggkqclpam.supabase.co", "sb_publishable_yrrYwNoNXxalAHwTVhyXhQ_NtgMYRc3");
+
+function getStatus(id) {
+  const mine = reports.filter(r => r.block === id);
+  if (mine.length === 0) return "on";
+  return mine[mine.length - 1].status;
+}
+
+async function addReport(status) {
+  await save({ block: selected, status: status, time: Date.now() });
+  load();
+}
+
+function renderPanel() {
+  const title = document.getElementById("panelTitle");
+  const text = document.getElementById("panelText");
+  const buttons = document.getElementById("panelButtons");
+  buttons.innerHTML = "";
+  if (selected === null) {
+    title.textContent = "Pick a block";
+    text.textContent = "Tap any square on the map.";
+    return;
+  }
+  title.textContent = "Block " + selected;
+  text.textContent = verdict(selected);
+  const outBtn = document.createElement("button");
+  outBtn.textContent = "Report power cut";
+  outBtn.onclick = function () { addReport("out"); };
+  const onBtn = document.createElement("button");
+  onBtn.textContent = "Power is back";
+  onBtn.onclick = function () { addReport("on"); };
+  buttons.appendChild(outBtn);
+  buttons.appendChild(onBtn);
+}
+
+function timeAgo(t) {
+  const mins = Math.round((Date.now() - t) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return mins + " min ago";
+  return Math.round(mins / 60) + " hour(s) ago";
+}
+
+function renderList() {
+  const list = document.getElementById("list");
+  list.innerHTML = "";
+  if (reports.length === 0) {
+    list.innerHTML = "<li>No reports yet.</li>";
+    return;
+  }
+  const latest = reports.slice().reverse().slice(0, 8);
+  for (const r of latest) {
+    const li = document.createElement("li");
+    li.textContent = "Block " + r.block + ": " +
+      (r.status === "out" ? "power cut reported" : "power is back") +
+      " (" + timeAgo(r.time) + ")";
+    list.appendChild(li);
+  }
+}
+
+async function load() {
+  const { data, error } = await db.from("reports").select("*").order("time", { ascending: true });
+  if (error) { console.log(error); return; }
+  reports = data;
+  render();
+}
+
+async function save(report) {
+  const { error } = await db.from("reports").insert(report);
+  if (error) console.log(error);
+}
+
+function outNeighbors(id) {
+  const r = ROWS.indexOf(id[0]);
+  const c = Number(id.slice(1));
+  let count = 0;
+  const spots = [[r-1, c], [r+1, c], [r, c-1], [r, c+1]];
+  for (const [rr, cc] of spots) {
+    if (rr >= 0 && rr < ROWS.length && cc >= 1 && cc <= COLS) {
+      if (getStatus(ROWS[rr] + cc) === "out") count++;
+    }
+  }
+  return count;
+}
+
+function verdict(id) {
+  if (getStatus(id) !== "out") return "Power looks on here. Lost it? Tap Report power cut.";
+  const n = outNeighbors(id);
+  if (n >= 2) return "Neighbors are out too. This looks like an area problem.";
+  if (n === 1) return "One neighbor is out too. It may be a small local fault.";
+  return "No neighbors are out. Check your fuse or breaker and ask next door.";
+}
+
+function averageOutageMinutes() {
+  const open = {};
+  const lengths = [];
+  for (const r of reports) {
+    if (r.status === "out") {
+      if (open[r.block] === undefined) open[r.block] = r.time;
+    } else if (open[r.block] !== undefined) {
+      lengths.push(r.time - open[r.block]);
+      delete open[r.block];
+    }
+  }
+  if (lengths.length === 0) return null;
+  const total = lengths.reduce((a, b) => a + b, 0);
+  return Math.round(total / lengths.length / 60000);
+}
+
+function render() {
+  const grid = document.getElementById("grid");
+  grid.innerHTML = "";
+  let outCount = 0;
+  for (const row of ROWS) {
+    for (let c = 1; c <= COLS; c++) {
+      const id = row + c;
+      const status = getStatus(id);
+      if (status === "out") outCount++;
+      const btn = document.createElement("button");
+      btn.textContent = id;
+      btn.className = "tile " + status + (id === selected ? " selected" : "");
+      btn.onclick = function () { selected = id; render(); };
+      grid.appendChild(btn);
+    }
+  }
+  document.getElementById("summary").textContent =
+    outCount === 0 ? "Power is on everywhere." : outCount + " block(s) have no power right now.";
+  const avg = averageOutageMinutes();
+  document.getElementById("pattern").textContent = avg === null
+    ? "Not enough data for patterns yet."
+    : "From past reports, outages here last about " + avg + " minutes.";
+  renderPanel();
+  renderList();
+}
+
+render();
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>
